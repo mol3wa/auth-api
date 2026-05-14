@@ -20,7 +20,7 @@ class SignupView(generics.CreateAPIView):
     def perform_create(self, serializer):
         user = serializer.save()
         otp = EmailOTP.generate_otp(user, 'signup')
-        send_otp_email(user.email, user.first_name, otp.otp_code, 'signup')
+        #send_otp_email(user.email, user.first_name, otp.otp_code, 'signup')
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
