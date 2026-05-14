@@ -10,7 +10,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = 'django-insecure-vb&fcci_)3s5k-m-205@(zpigj#mo1l=%2x2ie^iou$8jl1f)k'
 
-DEBUG = False  
+DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 
 ALLOWED_HOSTS = ['*']  
 
@@ -63,10 +63,9 @@ WSGI_APPLICATION = 'auth_project.wsgi.application'
 # -------------------------------
 DATABASES = {
     'default': dj_database_url.config(
-        default=os.environ.get('DATABASE_URL')
+        default='sqlite:///db.sqlite3'
     )
 }
-
 
 # -------------------------------
 # PASSWORD VALIDATION
