@@ -14,6 +14,15 @@ from .services import send_otp_email
 User = get_user_model()
 
 class SignupView(generics.CreateAPIView):
+
+    """
+    Register a new user.
+
+    Accepts `email`, `first_name`, `last_name`, and `password`.
+    The account is created **inactive** — the user must verify their email
+    with the OTP sent to the provided address (see `/api/verify-email/`).
+    """
+     
     serializer_class = SignupSerializer
     permission_classes = [permissions.AllowAny]
 
@@ -32,6 +41,12 @@ class SignupView(generics.CreateAPIView):
         )
 
 class VerifyEmailView(APIView):
+    """
+    Verify a user's email using the OTP they received.
+
+    Required fields: `email` (the address used during signup) and `otp` (6‑digit code).
+    On success the account is activated and can log in.
+    """
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
@@ -69,9 +84,27 @@ class EmailTokenObtainPairSerializer(TokenObtainPairSerializer):
     username_field = User.USERNAME_FIELD  # 'email'
 
 class LoginView(TokenObtainPairView):
+
+    """
+    Obtain an access and refresh JWT token pair.
+
+    Send `email` and `password` in the request body.
+    The response contains `access` (short‑lived) and `refresh` (long‑lived) tokens.
+    Pass the `access` token as a `Bearer` authorization header for authenticated endpoints.
+    """
+    
     serializer_class = EmailTokenObtainPairSerializer
 
 class InitiateEmailUpdateView(APIView):
+    """
+    Request to change the authenticated user's email address.
+
+    Requires a valid JWT token in the `Authorization` header.
+    Send `{"new_email": "new@example.com"}`. A new OTP is sent to the new address.
+    Complete the update by verifying that OTP via `/api/verify-update-email/`.
+    """
+
+
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
@@ -84,6 +117,12 @@ class InitiateEmailUpdateView(APIView):
         return Response({"detail": "OTP sent to new email. Verify to complete update."})
 
 class VerifyEmailUpdateView(APIView):
+    """
+    Confirm an email change by submitting the OTP sent to the new address.
+
+    Requires a valid JWT token. Send `{"otp": "123456"}`.
+    On success the user's email is permanently updated to the new address.
+    """
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
@@ -112,6 +151,12 @@ class VerifyEmailUpdateView(APIView):
         return Response({"detail": "Email updated successfully."})
 
 class DeleteAccountView(APIView):
+    """
+    Permanently delete the authenticated user's account.
+
+    Requires a valid JWT token. The request body must contain the current `password`.
+    If the password is correct the account is removed immediately.
+    """
     permission_classes = [permissions.IsAuthenticated]
 
     def delete(self, request):

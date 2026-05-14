@@ -10,7 +10,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = 'django-insecure-vb&fcci_)3s5k-m-205@(zpigj#mo1l=%2x2ie^iou$8jl1f)k'
 
-DEBUG = True
+DEBUG = False
 
 ALLOWED_HOSTS = ['*']  
 
@@ -23,21 +23,16 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-
-    # Third-party apps
     'rest_framework',
     'rest_framework_simplejwt',
-
-    # Local apps
     'accounts',
+    'drf_spectacular', 
 ]
 
 AUTH_USER_MODEL = 'accounts.User'
 
 
-# -------------------------------
-# MIDDLEWARE
-# -------------------------------
+
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
 
@@ -71,18 +66,14 @@ ROOT_URLCONF = 'auth_project.urls'
 WSGI_APPLICATION = 'auth_project.wsgi.application'
 
 
-# -------------------------------
-# DATABASE (POSTGRES FOR DEPLOYMENT)
-# -------------------------------
+
 DATABASES = {
     'default': dj_database_url.config(
         default='sqlite:///db.sqlite3'
     )
 }
 
-# -------------------------------
-# PASSWORD VALIDATION
-# -------------------------------
+
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
     {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
@@ -91,37 +82,36 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 
-# -------------------------------
-# INTERNATIONALIZATION
-# -------------------------------
+
 LANGUAGE_CODE = 'en-us'
 TIME_ZONE = 'UTC'
 USE_I18N = True
 USE_TZ = True
 
 
-# -------------------------------
-# STATIC FILES (RENDER FIX)
-# -------------------------------
+
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 
-# -------------------------------
-# DEFAULT AUTO FIELD
-# -------------------------------
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
-# -------------------------------
-# DRF + JWT
-# -------------------------------
+APPEND_SLASH = False
+
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ),
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Auth API',
+    'DESCRIPTION': 'Authentication system with email OTP, JWT login, email update, and account deletion.',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
 }
 
 SIMPLE_JWT = {
@@ -131,8 +121,6 @@ SIMPLE_JWT = {
 }
 
 
-# -------------------------------
-# EMAIL (BREVO)
-# -------------------------------
+
 BREVO_API_KEY = os.environ.get('BREVO_API_KEY')
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@yourapp.com')
