@@ -1,0 +1,266 @@
+openapi: 3.0.3
+info:
+  title: Auth API
+  version: 1.0.0
+  description: Authentication system with email OTP, JWT login, email update, and
+    account deletion.
+paths:
+  /:
+    get:
+      operationId: root_retrieve
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
+  /api/delete-account/:
+    delete:
+      operationId: api_delete_account_destroy
+      description: |-
+        Permanently delete the authenticated user's account.
+
+        Requires a valid JWT token. The request body must contain the current `password`.
+        If the password is correct the account is removed immediately.
+      tags:
+      - api
+      security:
+      - jwtAuth: []
+      responses:
+        '204':
+          description: No response body
+  /api/login/:
+    post:
+      operationId: api_login_create
+      description: |-
+        Obtain an access and refresh JWT token pair.
+
+        Send `email` and `password` in the request body.
+        The response contains `access` (short‑lived) and `refresh` (long‑lived) tokens.
+        Pass the `access` token as a `Bearer` authorization header for authenticated endpoints.
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmailTokenObtainPair'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/EmailTokenObtainPair'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/EmailTokenObtainPair'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmailTokenObtainPair'
+          description: ''
+  /api/signup/:
+    post:
+      operationId: api_signup_create
+      description: |-
+        Register a new user.
+
+        Accepts `email`, `first_name`, `last_name`, and `password`.
+        The account is created **inactive** — the user must verify their email
+        with the OTP sent to the provided address (see `/api/verify-email/`).
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Signup'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/Signup'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Signup'
+        required: true
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Signup'
+          description: ''
+  /api/update-email/:
+    post:
+      operationId: api_update_email_create
+      description: |-
+        Request to change the authenticated user's email address.
+
+        Requires a valid JWT token in the `Authorization` header.
+        Send `{"new_email": "new@example.com"}`. A new OTP is sent to the new address.
+        Complete the update by verifying that OTP via `/api/verify-update-email/`.
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InitiateEmailUpdate'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/InitiateEmailUpdate'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/InitiateEmailUpdate'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
+  /api/verify-email/:
+    post:
+      operationId: api_verify_email_create
+      description: |-
+        Verify a user's email using the OTP they received.
+
+        Required fields: `email` (the address used during signup) and `otp` (6‑digit code).
+        On success the account is activated and can log in.
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyEmail'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/VerifyEmail'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/VerifyEmail'
+        required: true
+      security:
+      - jwtAuth: []
+      - {}
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
+  /api/verify-update-email/:
+    post:
+      operationId: api_verify_update_email_create
+      description: |-
+        Confirm an email change by submitting the OTP sent to the new address.
+
+        Requires a valid JWT token. Send `{"otp": "123456"}`.
+        On success the user's email is permanently updated to the new address.
+      tags:
+      - api
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyEmailUpdate'
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/VerifyEmailUpdate'
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/VerifyEmailUpdate'
+        required: true
+      security:
+      - jwtAuth: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+          description: ''
+components:
+  schemas:
+    EmailTokenObtainPair:
+      type: object
+      properties:
+        email:
+          type: string
+          writeOnly: true
+        password:
+          type: string
+          writeOnly: true
+      required:
+      - email
+      - password
+    InitiateEmailUpdate:
+      type: object
+      properties:
+        new_email:
+          type: string
+          format: email
+      required:
+      - new_email
+    Signup:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+          title: Email address
+          maxLength: 254
+        first_name:
+          type: string
+          maxLength: 150
+        last_name:
+          type: string
+          maxLength: 150
+        password:
+          type: string
+          writeOnly: true
+      required:
+      - email
+      - first_name
+      - last_name
+      - password
+    VerifyEmail:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        otp:
+          type: string
+          maxLength: 6
+      required:
+      - email
+      - otp
+    VerifyEmailUpdate:
+      type: object
+      properties:
+        otp:
+          type: string
+          maxLength: 6
+      required:
+      - otp
+  securitySchemes:
+    jwtAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

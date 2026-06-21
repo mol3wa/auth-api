@@ -56,7 +56,8 @@ class EmailOTP(models.Model):
     new_email = models.EmailField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     is_verified = models.BooleanField(default=False)
-
+    
+    
     def is_expired(self):
         from django.utils import timezone
         from datetime import timedelta

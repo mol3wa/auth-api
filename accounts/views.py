@@ -1,15 +1,18 @@
 from rest_framework import status, generics, permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.exceptions import ValidationError
 from rest_framework_simplejwt.views import TokenObtainPairView
 from django.contrib.auth import get_user_model
 from .serializers import (
     SignupSerializer, VerifyEmailSerializer,
     InitiateEmailUpdateSerializer, VerifyEmailUpdateSerializer,
-    DeleteAccountSerializer
+    DeleteAccountSerializer, UserProfileSerializer
 )
 from .models import EmailOTP
 from .services import send_otp_email
+from drf_spectacular.utils import extend_schema
+from drf_spectacular.types import OpenApiTypes
 
 User = get_user_model()
 
@@ -29,7 +32,11 @@ class SignupView(generics.CreateAPIView):
     def perform_create(self, serializer):
         user = serializer.save()
         otp = EmailOTP.generate_otp(user, 'signup')
-        send_otp_email(user.email, user.first_name, otp.otp_code, 'signup')
+        try:
+            send_otp_email(user.email, user.first_name, otp.otp_code, 'signup')
+        except Exception:
+            user.delete()
+            raise ValidationError({"detail": "Unable to send OTP email. Please try again later."})
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -40,17 +47,22 @@ class SignupView(generics.CreateAPIView):
             status=status.HTTP_201_CREATED
         )
 
-class VerifyEmailView(APIView):
+class VerifyEmailView(generics.GenericAPIView):
     """
     Verify a user's email using the OTP they received.
 
     Required fields: `email` (the address used during signup) and `otp` (6‑digit code).
     On success the account is activated and can log in.
     """
+    serializer_class = VerifyEmailSerializer
     permission_classes = [permissions.AllowAny]
 
-    def post(self, request):
-        serializer = VerifyEmailSerializer(data=request.data)
+    @extend_schema(
+        request=VerifyEmailSerializer,
+        responses=OpenApiTypes.OBJECT,
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         email = serializer.validated_data['email']
         otp_code = serializer.validated_data['otp']
@@ -95,7 +107,7 @@ class LoginView(TokenObtainPairView):
     
     serializer_class = EmailTokenObtainPairSerializer
 
-class InitiateEmailUpdateView(APIView):
+class InitiateEmailUpdateView(generics.GenericAPIView):
     """
     Request to change the authenticated user's email address.
 
@@ -104,29 +116,42 @@ class InitiateEmailUpdateView(APIView):
     Complete the update by verifying that OTP via `/api/verify-update-email/`.
     """
 
-
+    serializer_class = InitiateEmailUpdateSerializer
     permission_classes = [permissions.IsAuthenticated]
 
-    def post(self, request):
-        serializer = InitiateEmailUpdateSerializer(data=request.data)
+    @extend_schema(
+        request=InitiateEmailUpdateSerializer,
+        responses=OpenApiTypes.OBJECT,
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         new_email = serializer.validated_data['new_email']
         user = request.user
         otp = EmailOTP.generate_otp(user, 'email_update', new_email=new_email)
-        send_otp_email(new_email, user.first_name, otp.otp_code, 'email_update')
+        try:
+            send_otp_email(new_email, user.first_name, otp.otp_code, 'email_update')
+        except Exception:
+            otp.delete()
+            raise ValidationError({"detail": "Unable to send OTP email to the new address. Please try again later."})
         return Response({"detail": "OTP sent to new email. Verify to complete update."})
 
-class VerifyEmailUpdateView(APIView):
+class VerifyEmailUpdateView(generics.GenericAPIView):
     """
     Confirm an email change by submitting the OTP sent to the new address.
 
     Requires a valid JWT token. Send `{"otp": "123456"}`.
     On success the user's email is permanently updated to the new address.
     """
+    serializer_class = VerifyEmailUpdateSerializer
     permission_classes = [permissions.IsAuthenticated]
 
-    def post(self, request):
-        serializer = VerifyEmailUpdateSerializer(data=request.data)
+    @extend_schema(
+        request=VerifyEmailUpdateSerializer,
+        responses=OpenApiTypes.OBJECT,
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         otp_code = serializer.validated_data['otp']
         user = request.user
@@ -150,17 +175,22 @@ class VerifyEmailUpdateView(APIView):
         otp.save()
         return Response({"detail": "Email updated successfully."})
 
-class DeleteAccountView(APIView):
+class DeleteAccountView(generics.GenericAPIView):
     """
     Permanently delete the authenticated user's account.
 
     Requires a valid JWT token. The request body must contain the current `password`.
     If the password is correct the account is removed immediately.
     """
+    serializer_class = DeleteAccountSerializer
     permission_classes = [permissions.IsAuthenticated]
 
-    def delete(self, request):
-        serializer = DeleteAccountSerializer(data=request.data)
+    @extend_schema(
+        request=DeleteAccountSerializer,
+        responses=OpenApiTypes.OBJECT,
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         password = serializer.validated_data['password']
         user = request.user
@@ -168,3 +198,13 @@ class DeleteAccountView(APIView):
             return Response({"detail": "Incorrect password."}, status=status.HTTP_400_BAD_REQUEST)
         user.delete()
         return Response({"detail": "Account deleted."}, status=status.HTTP_204_NO_CONTENT)
+class UserProfileView(generics.RetrieveUpdateAPIView):
+    """
+    Retrieve and update the authenticated user's profile.
+    """
+
+    serializer_class = UserProfileSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_object(self):
+        return self.request.user

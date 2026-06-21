@@ -8,5 +8,6 @@ urlpatterns = [
     path('update-email/', views.InitiateEmailUpdateView.as_view(), name='initiate-email-update'),
     path('verify-update-email/', views.VerifyEmailUpdateView.as_view(), name='verify-email-update'),
     path('delete-account/', views.DeleteAccountView.as_view(), name='delete-account'),
+    path("profile/", views.UserProfileView.as_view(), name="user-profile")
 ]
 

@@ -3,14 +3,20 @@ from pathlib import Path
 from datetime import timedelta
 import os
 import dj_database_url
+from dotenv import load_dotenv
+
+
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+load_dotenv(BASE_DIR / '.env')
 
 
-SECRET_KEY = 'django-insecure-vb&fcci_)3s5k-m-205@(zpigj#mo1l=%2x2ie^iou$8jl1f)k'
 
-DEBUG = False
+
+
+SECRET_KEY = os.getenv('SECRET_KEY')
+DEBUG = os.getenv('DEBUG') == 'True'
 
 ALLOWED_HOSTS = ['*']  
 
@@ -122,5 +128,5 @@ SIMPLE_JWT = {
 
 
 
-BREVO_API_KEY = os.environ.get('BREVO_API_KEY')
-DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'noreply@yourapp.com')
+BREVO_API_KEY = os.getenv('BREVO_API_KEY')
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'noreply@yourapp.com')

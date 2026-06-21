@@ -9,8 +9,11 @@ from drf_spectacular.views import (
 
 from rest_framework.response import Response
 from rest_framework.decorators import api_view
+from drf_spectacular.utils import extend_schema
+from drf_spectacular.types import OpenApiTypes
 
 
+@extend_schema(request=None, responses={200: OpenApiTypes.OBJECT})
 @api_view(['GET'])
 def home(request):
     return Response({
@@ -27,6 +30,7 @@ def home(request):
             "update_email": "/api/update-email",
             "verify_update_email": "/api/verify-update-email",
             "delete_account": "/api/delete-account",
+            "profile": "/api/profile",
         }
     })
 
