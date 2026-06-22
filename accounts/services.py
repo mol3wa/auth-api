@@ -11,6 +11,9 @@ def send_otp_email(email, first_name, otp_code, purpose):
     """
     
     configuration = sib_api_v3_sdk.Configuration()
+    print("BREVO KEY EXISTS:", bool(settings.BREVO_API_KEY))
+    print("BREVO KEY START:", settings.BREVO_API_KEY[:10] if settings.BREVO_API_KEY else "NONE")
+
     configuration.api_key['api-key'] = settings.BREVO_API_KEY
     api_instance = sib_api_v3_sdk.TransactionalEmailsApi(sib_api_v3_sdk.ApiClient(configuration))
     
