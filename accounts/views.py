@@ -1,13 +1,17 @@
-from rest_framework import status, generics, permissions
+from rest_framework import status, generics, permissions,viewsets
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.contrib.auth import get_user_model
 
+from accounts.permissions import IsAssignedUser, IsWorkspaceManagerOrOwner, IsWorkspaceOwner
+from .models import Workspace,WorkspaceMembership,Task,Project
+
 from .serializers import (
     SignupSerializer, VerifyEmailSerializer,
     InitiateEmailUpdateSerializer, VerifyEmailUpdateSerializer,
-    DeleteAccountSerializer, UserProfileSerializer
+    DeleteAccountSerializer, UserProfileSerializer, WorkspaceSerializer,WorkspaceMembershipSerializer,ProjectSerializer,TaskSerializer
 )
 from .services import (
     signup_user,
@@ -15,9 +19,14 @@ from .services import (
     initiate_email_update,
     verify_email_update,
     delete_user_account,
+    WorkspaceService,
+    ProjectService,
+    TaskService,
+
 )
 from drf_spectacular.utils import extend_schema
 from drf_spectacular.types import OpenApiTypes
+from rest_framework.decorators import action
 
 User = get_user_model()
 
@@ -169,3 +178,130 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
 
     def get_object(self):
         return self.request.user
+
+
+class WorkspaceViewSet(viewsets.ModelViewSet):
+    serializer_class = WorkspaceSerializer
+
+    def get_queryset(self):
+        return Workspace.objects.filter(
+            memberships__user=self.request.user
+        ).distinct()
+
+    def perform_create(self, serializer):
+        workspace = WorkspaceService.create_workspace(
+            user=self.request.user,
+            validated_data=serializer.validated_data,
+        )
+        serializer.instance = workspace
+
+    def get_permissions(self):
+        if self.action == "destroy":
+            return [permissions.IsAuthenticated(), IsWorkspaceOwner()]
+        return [permissions.IsAuthenticated()]
+
+
+class WorkspaceMembershipViewSet(viewsets.ModelViewSet):
+    serializer_class = WorkspaceMembershipSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return WorkspaceMembership.objects.filter(user=self.request.user)
+    
+    def perform_create(self, serializer):
+        membership = WorkspaceService.add_member(
+            invited_by=self.request.user,
+            validated_data=serializer.validated_data,
+        )
+        serializer.instance = membership
+
+
+class ProjectViewSet(viewsets.ModelViewSet):
+    serializer_class = ProjectSerializer
+
+    def get_queryset(self):
+        return Project.objects.filter(
+            workspace__memberships__user=self.request.user
+        ).distinct()
+
+    def perform_create(self, serializer):
+        project = ProjectService.create_project(
+            user=self.request.user,
+            validated_data=serializer.validated_data,
+        )
+        serializer.instance = project
+
+    def get_permissions(self):
+        if self.action in ["create", "update", "partial_update", "destroy"]:
+            return [permissions.IsAuthenticated(), IsWorkspaceManagerOrOwner()]
+        return [permissions.IsAuthenticated()]
+
+
+class TaskViewSet(viewsets.ModelViewSet):
+    serializer_class = TaskSerializer
+
+    def get_queryset(self):
+        return Task.objects.filter(
+            project__workspace__memberships__user=self.request.user
+        ).distinct()
+
+    def perform_create(self, serializer):
+        task = TaskService.create_task(
+            user=self.request.user,
+            validated_data=serializer.validated_data,
+        )
+        serializer.instance = task
+
+    def get_permissions(self):
+        if self.action == "create":
+            return [permissions.IsAuthenticated(), IsWorkspaceManagerOrOwner()]
+
+        if self.action in ["update", "partial_update", "start"]:
+            return [
+                permissions.IsAuthenticated(),
+                (IsWorkspaceManagerOrOwner | IsAssignedUser)(),
+            ]
+
+        if self.action == "submit":
+            return [permissions.IsAuthenticated(), IsAssignedUser()]
+
+        if self.action in ["approve", "reject", "cancel"]:
+            return [permissions.IsAuthenticated(), IsWorkspaceManagerOrOwner()]
+
+        return [permissions.IsAuthenticated()]
+
+    # --- custom actions: just fetch object -> call service -> serialize ---
+    @action(detail=True, methods=["post"])
+    def start(self, request, pk=None):
+        task = TaskService.transition(self.get_object(), "start", request.user)
+        return Response(self.get_serializer(task).data)
+
+    @action(detail=True, methods=["post"])
+    def submit(self, request, pk=None):
+        task = TaskService.transition(self.get_object(), "submit", request.user)
+        return Response(self.get_serializer(task).data)
+
+    @action(detail=True, methods=["post"])
+    def approve(self, request, pk=None):
+        task = TaskService.transition(self.get_object(), "approve", request.user)
+        return Response(self.get_serializer(task).data)
+
+    @action(detail=True, methods=["post"])
+    def reject(self, request, pk=None):
+        task = TaskService.transition(self.get_object(), "reject", request.user)
+        return Response(self.get_serializer(task).data)
+
+    @action(detail=True, methods=["post"])
+    def cancel(self, request, pk=None):
+        task = TaskService.transition(self.get_object(), "cancel", request.user)
+        return Response(self.get_serializer(task).data)
+
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from .models import Workspace
+from .serializers import UseCreditsSerializer
+from .services import use_credits
+

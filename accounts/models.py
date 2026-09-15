@@ -2,6 +2,7 @@
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models
 from django.utils.translation import gettext_lazy as _
+from django.conf import settings
 
 
 class UserManager(BaseUserManager):
@@ -74,3 +75,176 @@ class EmailOTP(models.Model):
             purpose=purpose,
             new_email=new_email,
         )
+
+class Workspace (models.Model):
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    members = models.ManyToManyField(
+        User,
+        through="WorkspaceMembership",
+        related_name="workspaces"
+    )
+    credit_balance = models.PositiveIntegerField(default=0)
+    
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(credit_balance__gte=0),
+                name="credit_balance_non_negative",
+            ),
+        ]
+
+
+    def __str__(self):
+        return self.name
+
+class WorkspaceMembership(models.Model):
+    class RoleType(models.TextChoices):
+        OWNER = "OWNER", "Owner"
+        MANAGER = "MANAGER", "Manager"
+        MEMBER = "MEMBER", "Member"
+    user= models.ForeignKey(User, on_delete=models.CASCADE,related_name="memberships")
+    workspace= models.ForeignKey(Workspace, on_delete=models.CASCADE,related_name="memberships")
+    role= models.CharField(choices=RoleType.choices, max_length=20)
+    joined_at = models.DateTimeField(auto_now_add=True)
+    class Meta:
+     constraints = [
+        models.UniqueConstraint(
+            fields=["workspace", "user"],
+            name="unique_workspace_membership"
+        )
+    ]
+    def __str__(self):
+        return f"{self.user.email} - {self.workspace.name} ({self.role})"
+
+class CreditUsage(models.Model):
+    workspace = models.ForeignKey(
+        Workspace,
+        on_delete=models.CASCADE,
+        related_name="credit_usages",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="credit_usages",
+    )
+    credits_used = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.credits_used} credits used by {self.workspace.name}"
+
+class AuditRecord(models.Model):
+    workspace = models.ForeignKey(
+        Workspace,
+        on_delete=models.CASCADE,
+        related_name="audit_records",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="audit_records",
+    )
+    action = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.action} - {self.workspace.name}"
+
+
+
+class Project(models.Model):
+    workspace = models.ForeignKey(
+        Workspace,
+        on_delete=models.CASCADE,
+        related_name="projects")
+    name = models.CharField(max_length=255)
+    created_by= models.ForeignKey(User,on_delete=models.CASCADE,
+        related_name="created_projects" )
+    description = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.name
+
+class Task(models.Model):
+    class StatusType(models.TextChoices):
+        TODO = "TODO", "Todo"
+        IN_PROGRESS = "IN_PROGRESS", "In Progress"
+        IN_REVIEW = "IN_REVIEW", "In Review"
+        APPROVED = "APPROVED", "Approved"
+        REJECTED = "REJECTED", "Rejected"
+        CANCELLED = "CANCELLED", "Cancelled"
+    project = models.ForeignKey(Project, on_delete=models.CASCADE,
+        related_name="tasks")
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True, null=True)
+    assigned_to= models.ForeignKey(User,on_delete=models.SET_NULL,null=True, blank=True, related_name="assigned_tasks" )
+    created_by= models.ForeignKey(User,on_delete=models.SET_NULL,null=True, related_name="created_tasks" )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    status= models.CharField(choices=StatusType.choices,max_length=20, default=StatusType.TODO)
+
+    TRANSITIONS = {
+        "start":   ({StatusType.TODO}, StatusType.IN_PROGRESS),
+        "submit":  ({StatusType.IN_PROGRESS, StatusType.REJECTED}, StatusType.IN_REVIEW),
+        "approve": ({StatusType.IN_REVIEW}, StatusType.APPROVED),
+        "reject":  ({StatusType.IN_REVIEW}, StatusType.REJECTED),
+        "cancel":  ({StatusType.TODO, StatusType.IN_PROGRESS, StatusType.IN_REVIEW}, StatusType.CANCELLED),
+    }
+
+    def can_transition(self, action_name):
+        allowed_from, _ = self.TRANSITIONS[action_name]
+        return self.status in allowed_from
+
+    def apply_transition(self, action_name):
+        _, target_status = self.TRANSITIONS[action_name]
+        self.status = target_status
+        self.save(update_fields=["status"])
+    def __str__(self):
+        return self.title
+    
+class Notification(models.Model):
+    class NotificationType(models.TextChoices):
+        WORKSPACE_INVITE = "workspace_invite", "Workspace Invite"
+        TASK_ASSIGNED = "task_assigned", "Task Assigned"
+        TASK_APPROVED = "task_approved", "Task Approved"
+        WORKSPACE_CREATED = "workspace_created", "Workspace Created"
+
+    class StatusType(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        PROCESSING = "PROCESSING", "Processing"
+        SUCCESS = "SUCCESS", "Success"
+        FAILED = "FAILED", "Failed"
+
+    recipient = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="notifications"
+    )
+    notification_type = models.CharField(max_length=50, choices=NotificationType.choices)
+    payload = models.JSONField(default=dict, blank=True)
+
+    status = models.CharField(
+        max_length=20, choices=StatusType.choices, default=StatusType.PENDING
+    )
+    attempts = models.PositiveIntegerField(default=0)
+    last_error_message = models.TextField(blank=True, default="")
+    sent_at = models.DateTimeField(blank=True, null=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["status", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.notification_type} -> {self.recipient_id} ({self.status})"
+ 

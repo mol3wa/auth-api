@@ -1,12 +1,13 @@
 import logging
 
+from django.db import transaction
 import sib_api_v3_sdk
 from sib_api_v3_sdk.rest import ApiException
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import ValidationError, PermissionDenied
+from .models import EmailOTP,WorkspaceMembership, Workspace, Project, Task, Notification,AuditRecord,CreditUsage
 
-from .models import EmailOTP
 
 User = get_user_model()
 
@@ -133,3 +134,271 @@ def delete_user_account(user, password):
     if not user.check_password(password):
         raise ValidationError({"detail": "Incorrect password."})
     user.delete()
+
+class WorkspaceService:
+
+    @staticmethod
+    def create_workspace(user, validated_data):
+        workspace = Workspace.objects.create(**validated_data)
+        WorkspaceMembership.objects.create(
+            user=user,
+            workspace=workspace,
+            role=WorkspaceMembership.RoleType.OWNER,
+        )
+
+        notification = NotificationService.create(
+            recipient=user,
+            notification_type=Notification.NotificationType.WORKSPACE_CREATED,
+            payload={"workspace_name": workspace.name},
+        )
+        from accounts.tasks import send_notification_email
+        send_notification_email(notification.id)
+
+        return workspace
+    @staticmethod
+    def add_member(invited_by, validated_data):
+        """
+        Creates a new WorkspaceMembership and notifies the invited user.
+        `validated_data` comes straight from WorkspaceMembershipSerializer —
+        expected to contain `user`, `workspace`, and `role`.
+        """
+        membership = WorkspaceMembership.objects.create(**validated_data)
+
+        notification = NotificationService.create(
+            recipient=membership.user,
+            notification_type=Notification.NotificationType.WORKSPACE_INVITE,
+            payload={
+                "workspace_name": membership.workspace.name,
+                "invited_by": invited_by.first_name,
+            },
+        )
+        from accounts.tasks import send_notification_email
+        send_notification_email(notification.id)
+
+        return membership
+
+
+class ProjectService:
+
+    @staticmethod
+    @transaction.atomic
+    def create_project(user, validated_data):
+        workspace = validated_data["workspace"]
+
+        use_credits(
+            workspace=workspace,
+            user=user,
+            amount=5,
+        )
+
+        return Project.objects.create(
+            created_by=user,
+            **validated_data
+        )
+
+
+class TaskService:
+
+    @staticmethod
+    @transaction.atomic
+    def create_task(user, validated_data):
+        project = validated_data["project"]
+        assigned_to = validated_data.get("assigned_to")
+
+        if assigned_to:
+            use_credits(
+                workspace=project.workspace,
+                user=user,
+                amount=3,
+            )
+
+        task = Task.objects.create(
+            created_by=user,
+            **validated_data
+        )
+
+        if task.assigned_to_id:
+            notification = NotificationService.create(
+                recipient=task.assigned_to,
+                notification_type=Notification.NotificationType.TASK_ASSIGNED,
+                payload={"task_title": task.title},
+            )
+
+            from accounts.tasks import send_notification_email
+            send_notification_email(notification.id)
+
+        return task
+
+    @staticmethod
+    def transition(task, action_name, user):
+        if action_name in ("approve", "reject") and task.assigned_to_id == user.id:
+            raise PermissionDenied(
+                f"You cannot {action_name} a task assigned to yourself."
+            )
+
+        if not task.can_transition(action_name):
+            raise ValidationError(
+                f"Cannot '{action_name}' a task in status '{task.status}'."
+            )
+
+        task.apply_transition(action_name)
+
+        if action_name == "approve":
+            notification = NotificationService.create(
+                recipient=task.assigned_to,
+                notification_type=Notification.NotificationType.TASK_APPROVED,
+                payload={"task_title": task.title, "approved_by": user.first_name},
+            )
+            from accounts.tasks import send_notification_email
+            send_notification_email(notification.id)
+
+        return task
+    
+   
+
+class NotificationService:
+    @staticmethod
+    def create(*, recipient, notification_type: str, payload: dict) -> Notification:
+        notification = Notification.objects.create(
+            recipient=recipient,
+            notification_type=notification_type,
+            payload=payload,
+        )
+        logger.info(
+            "Notification created id=%s type=%s recipient=%s",
+            notification.id, notification_type, recipient.id,
+        )
+        return notification
+
+
+def render_notification_email(notification):
+    data = notification.payload
+    nt = notification.notification_type
+
+    if nt == Notification.NotificationType.WORKSPACE_INVITE:
+        subject = f"You've been invited to {data['workspace_name']}"
+        body = f"<p>Hi,</p><p>{data['invited_by']} invited you to join {data['workspace_name']}.</p>"
+
+    elif nt == Notification.NotificationType.TASK_ASSIGNED:
+        subject = f"New task assigned: {data['task_title']}"
+        body = f"<p>You've been assigned: <strong>{data['task_title']}</strong>.</p>"
+
+    elif nt == Notification.NotificationType.TASK_APPROVED:
+        subject = f"Task approved: {data['task_title']}"
+        body = f"<p>{data['approved_by']} approved your task: <strong>{data['task_title']}</strong>.</p>"
+
+    elif nt == Notification.NotificationType.WORKSPACE_CREATED:
+        subject = f"Workspace {data['workspace_name']} created"
+        body = f"<p>Your workspace <strong>{data['workspace_name']}</strong> is ready.</p>"
+
+    else:
+        raise ValueError(f"No email renderer for notification type: {nt}")
+
+    return subject, body
+
+
+class NotificationDeliveryService:
+    """Owns the business rules for delivering a single notification email:
+    guarding against double-send, recording attempts, and recording outcome.
+    Knows nothing about Huey, retries, or task scheduling.
+    """
+
+    @staticmethod
+    def lock_for_sending(notification_id: int) -> Notification | None:
+        """Locks the row, guards against re-sending, marks PROCESSING.
+        Returns None if there's nothing to do (missing or already sent).
+        """
+        with transaction.atomic():
+            try:
+                notification = Notification.objects.select_for_update().get(id=notification_id)
+            except Notification.DoesNotExist:
+                logger.error("Notification id=%s not found, aborting", notification_id)
+                return None
+
+            if notification.status == Notification.StatusType.SUCCESS:
+                logger.info("Notification id=%s already sent, skipping", notification_id)
+                return None
+
+            notification.status = Notification.StatusType.PROCESSING
+            notification.attempts += 1
+            notification.save(update_fields=["status", "attempts"])
+            return notification
+
+    @staticmethod
+    def deliver(notification: Notification) -> None:
+        """Sends the email and records the outcome. Raises RetryableEmailError
+        (or any unexpected exception) if the caller should retry.
+        """
+        provider = BrevoEmailProvider()
+        subject, html_body = render_notification_email(notification)
+
+        try:
+            provider.send_email(
+                to=notification.recipient.email,
+                subject=subject,
+                html_body=html_body,
+            )
+        except NonRetryableEmailError as e:
+            logger.error("Notification id=%s permanently failed: %s", notification.id, e)
+            notification.status = Notification.StatusType.FAILED
+            notification.last_error_message = str(e)
+            notification.save(update_fields=["status", "last_error_message"])
+            return
+
+        except RetryableEmailError as e:
+            logger.warning(
+                "Notification id=%s failed (attempt %s/%s): %s",
+                notification.id, notification.attempts, MAX_NOTIFICATION_ATTEMPTS, e,
+            )
+            notification.status = Notification.StatusType.FAILED
+            notification.last_error_message = str(e)
+            notification.save(update_fields=["status", "last_error_message"])
+            raise
+
+        except Exception as e:
+            # Anything we didn't anticipate: don't let it disappear silently.
+            # Record it like a retryable failure and let the caller decide
+            # whether to retry, so one unknown bug doesn't just eat the email.
+            logger.exception(
+                "Notification id=%s failed with unexpected error (attempt %s/%s): %s",
+                notification.id, notification.attempts, MAX_NOTIFICATION_ATTEMPTS, e,
+            )
+            notification.status = Notification.StatusType.FAILED
+            notification.last_error_message = f"Unexpected error: {e}"
+            notification.save(update_fields=["status", "last_error_message"])
+            raise
+
+        else:
+            notification.status = Notification.StatusType.SUCCESS
+            notification.sent_at = timezone.now()
+            notification.save(update_fields=["status", "sent_at"])
+            logger.info("Notification id=%s sent successfully", notification.id)
+
+@transaction.atomic
+def use_credits(workspace,user,amount):
+    if amount<=0:
+        raise ValueError("Amount must be greater than zero.")
+
+    
+    workspace = Workspace.objects.select_for_update().get(pk=workspace.pk)
+    
+    if workspace.credit_balance < amount:
+    
+        raise ValueError("Insufficient credits in workspace.")
+
+    workspace.credit_balance -= amount
+    workspace.save(update_fields=["credit_balance","updated_at"])
+
+    CreditUsage.objects.create(
+        workspace=workspace,
+        user=user,
+        credits_used=amount
+    )
+
+    AuditRecord.objects.create(
+        workspace=workspace,
+        user=user,
+        action=f" {amount} credits deducted.",
+    )
+
+    return workspace 

@@ -33,7 +33,10 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'accounts',
     'drf_spectacular', 
+
+    "huey.contrib.djhuey",
 ]
+
 
 AUTH_USER_MODEL = 'accounts.User'
 
@@ -74,8 +77,8 @@ WSGI_APPLICATION = 'auth_project.wsgi.application'
 
 
 DATABASES = {
-    'default': dj_database_url.config(
-        default=os.environ.get('DATABASE_URL')
+    "default": dj_database_url.config(
+        default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}"
     )
 }
 
@@ -130,3 +133,12 @@ SIMPLE_JWT = {
 
 BREVO_API_KEY = os.getenv('BREVO_API_KEY')
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'adebaymo@gmail.com')
+
+from huey import RedisHuey
+
+HUEY = {
+    "huey_class": "huey.SqliteHuey",
+    "name": "accounts",
+    "filename": "huey.db",
+    "immediate": False,
+}

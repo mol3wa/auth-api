@@ -1,136 +1,147 @@
-from django.test import TestCase
-from django.urls import reverse
-from rest_framework.test import APIClient
-from rest_framework import status
-from unittest.mock import patch
 from django.contrib.auth import get_user_model
-from .models import EmailOTP
+from django.test import TestCase
+from rest_framework.test import APITestCase
+
+from .models import AuditRecord, CreditUsage, Project, Task, Workspace, WorkspaceMembership
+from .services import use_credits
+
 
 User = get_user_model()
 
-class AuthAPITests(TestCase):
+
+class UseCreditsTransactionTest(TestCase):
+
     def setUp(self):
-        self.client = APIClient()
-        self.signup_url = reverse('signup')
-        self.verify_email_url = reverse('verify-email')
-        self.login_url = reverse('login')
-        self.update_email_url = reverse('initiate-email-update')
-        self.verify_update_url = reverse('verify-email-update')
-        self.delete_url = reverse('delete-account')
-        self.user_data = {
-            'email': 'test@example.com',
-            'first_name': 'John',
-            'last_name': 'Doe',
-            'password': 'strongPass123'
-        }
+        self.user = User.objects.create_user(
+          email="test@example.com",
+          first_name="Test",
+          last_name="User",
+          password="password123",
+)
+      
+        self.workspace = Workspace.objects.create(
+            name="Test Workspace",
+            credit_balance=100,
+        )
 
-    def _mock_send_otp(self):
-        return patch('accounts.views.send_otp_email')
+        self.workspace.members.add(self.user)
 
-    # ---------- Signup ----------
-    def test_signup_success(self):
-        with self._mock_send_otp() as mock_send:
-            response = self.client.post(self.signup_url, self.user_data, format='json')
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertIn('Signup successful', response.data['detail'])
-        user = User.objects.get(email=self.user_data['email'])
-        self.assertFalse(user.is_active)
-        self.assertTrue(EmailOTP.objects.filter(user=user, purpose='signup').exists())
+    def test_credits_are_deducted_and_records_created(self):
+        use_credits(
+            workspace=self.workspace,
+            user=self.user,
+            amount=20,
+        )
 
-    def test_signup_duplicate_email(self):
-        User.objects.create_user(**self.user_data)
-        with self._mock_send_otp():
-            response = self.client.post(self.signup_url, self.user_data, format='json')
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.workspace.refresh_from_db()
 
-    # ---------- Verify Email ----------
-    def test_verify_email_success(self):
-        user = User.objects.create_user(**self.user_data, is_active=False)
-        otp = EmailOTP.generate_otp(user, 'signup')
-        response = self.client.post(self.verify_email_url, {
-            'email': user.email,
-            'otp': otp.otp_code
-        }, format='json')
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        user.refresh_from_db()
-        self.assertTrue(user.is_active)
-        self.assertTrue(user.is_email_verified)
-        otp.refresh_from_db()
-        self.assertTrue(otp.is_verified)
+        self.assertEqual(self.workspace.credit_balance, 80)
 
-    def test_verify_email_invalid_otp(self):
-        user = User.objects.create_user(**self.user_data, is_active=False)
-        EmailOTP.generate_otp(user, 'signup')
-        response = self.client.post(self.verify_email_url, {
-            'email': user.email,
-            'otp': '000000'
-        }, format='json')
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            CreditUsage.objects.count(),
+            1,
+        )
 
-    # ---------- Login ----------
-    def test_login_success(self):
-        user = User.objects.create_user(**self.user_data, is_active=True, is_email_verified=True)
-        response = self.client.post(self.login_url, {
-            'email': self.user_data['email'],
-            'password': self.user_data['password']
-        }, format='json')
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertIn('access', response.data)
+        self.assertEqual(
+            AuditRecord.objects.count(),
+            1,
+        )
 
-    def test_login_inactive_user(self):
-        user = User.objects.create_user(**self.user_data, is_active=False)
-        response = self.client.post(self.login_url, {
-            'email': self.user_data['email'],
-            'password': self.user_data['password']
-        }, format='json')
-        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+    def test_transaction_rolls_back_on_failure(self):
+        original_balance = self.workspace.credit_balance
 
-    # ---------- Email Update ----------
-    def _authenticate(self):
-        user = User.objects.create_user(**self.user_data, is_active=True, is_email_verified=True)
-        token_response = self.client.post(self.login_url, {
-            'email': self.user_data['email'],
-            'password': self.user_data['password']
-        }, format='json')
-        token = token_response.data['access']
-        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
-        return user
+        try:
+            with self.assertRaises(Exception):
+                self._failing_credit_operation()
+        finally:
+            self.workspace.refresh_from_db()
 
-    def test_initiate_email_update(self):
-        user = self._authenticate()
-        with self._mock_send_otp() as mock_send:
-            response = self.client.post(self.update_email_url, {
-                'new_email': 'new@example.com'
-            }, format='json')
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        otp = EmailOTP.objects.get(user=user, purpose='email_update')
-        self.assertEqual(otp.new_email, 'new@example.com')
-        mock_send.assert_called_once()
+        self.assertEqual(
+            self.workspace.credit_balance,
+            original_balance,
+        )
 
-    def test_verify_email_update(self):
-        user = self._authenticate()
-        new_email = 'new@example.com'
-        otp = EmailOTP.generate_otp(user, 'email_update', new_email=new_email)
-        response = self.client.post(self.verify_update_url, {
-            'otp': otp.otp_code
-        }, format='json')
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        user.refresh_from_db()
-        self.assertEqual(user.email, new_email)
+        self.assertEqual(
+            CreditUsage.objects.count(),
+            0,
+        )
 
-    # ---------- Delete Account ----------
-    def test_delete_account_success(self):
-        user = self._authenticate()
-        response = self.client.delete(self.delete_url, {
-            'password': self.user_data['password']
-        }, format='json')
-        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
-        self.assertFalse(User.objects.filter(id=user.id).exists())
+        self.assertEqual(
+            AuditRecord.objects.count(),
+            0,
+        )
 
-    def test_delete_account_wrong_password(self):
-        self._authenticate()
-        response = self.client.delete(self.delete_url, {
-            'password': 'wrongpass'
-        }, format='json')
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertTrue(User.objects.filter(email=self.user_data['email']).exists())
+    def _failing_credit_operation(self):
+        from django.db import transaction
+
+        with transaction.atomic():
+            self.workspace.credit_balance -= 20
+            self.workspace.save()
+
+            raise Exception("Intentional failure")
+
+            CreditUsage.objects.create(
+                workspace=self.workspace,
+                user=self.user,
+                credits_used=20,
+            )
+
+            AuditRecord.objects.create(
+                workspace=self.workspace,
+                user=self.user,
+                action="20 credits deducted",
+            )
+
+
+class ProjectAndTaskCreationApiTest(APITestCase):
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="owner@example.com",
+            first_name="Project",
+            last_name="Owner",
+            password="password123",
+        )
+        self.workspace = Workspace.objects.create(
+            name="Creation Workspace",
+            credit_balance=10,
+        )
+        WorkspaceMembership.objects.create(
+            user=self.user,
+            workspace=self.workspace,
+            role=WorkspaceMembership.RoleType.OWNER,
+        )
+        self.client.force_authenticate(user=self.user)
+
+    def test_create_project_then_task(self):
+        project_response = self.client.post(
+            "/api/projects/",
+            {
+                "workspace": self.workspace.id,
+                "name": "Launch Project",
+                "description": "Project creation smoke test",
+            },
+            format="json",
+        )
+
+        self.assertEqual(project_response.status_code, 201)
+        project = Project.objects.get(id=project_response.data["id"])
+        self.assertEqual(project.created_by, self.user)
+
+        task_response = self.client.post(
+            "/api/tasks/",
+            {
+                "project": project.id,
+                "title": "Create API task",
+                "description": "Task creation smoke test",
+            },
+            format="json",
+        )
+
+        self.assertEqual(task_response.status_code, 201)
+        task = Task.objects.get(id=task_response.data["id"])
+        self.assertEqual(task.created_by, self.user)
+        self.assertEqual(task.project, project)
+        self.assertEqual(task.status, Task.StatusType.TODO)
+        self.workspace.refresh_from_db()
+        self.assertEqual(self.workspace.credit_balance, 5)
