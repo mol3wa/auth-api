@@ -1,9 +1,12 @@
 from django.contrib.auth import get_user_model
+from django.db import IntegrityError, transaction
 from django.test import TestCase
+from rest_framework.exceptions import ValidationError
 from rest_framework.test import APITestCase
+from unittest.mock import patch
 
 from .models import AuditRecord, CreditUsage, Project, Task, Workspace, WorkspaceMembership
-from .services import use_credits
+from .services import TaskService, WorkspaceService, use_credits
 
 
 User = get_user_model()
@@ -145,3 +148,129 @@ class ProjectAndTaskCreationApiTest(APITestCase):
         self.assertEqual(task.status, Task.StatusType.TODO)
         self.workspace.refresh_from_db()
         self.assertEqual(self.workspace.credit_balance, 5)
+
+
+class DatabaseConstraintTest(TestCase):
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="constraint-user@example.com",
+            first_name="Constraint",
+            last_name="User",
+            password="password123",
+        )
+        self.other_user = User.objects.create_user(
+            email="other-user@example.com",
+            first_name="Other",
+            last_name="User",
+            password="password123",
+        )
+        self.workspace = Workspace.objects.create(
+            name="Constraint Workspace",
+            credit_balance=10,
+        )
+        self.project = Project.objects.create(
+            workspace=self.workspace,
+            name="Constraint Project",
+            created_by=self.user,
+        )
+
+    def test_duplicate_workspace_membership_constraint(self):
+        WorkspaceMembership.objects.create(
+            user=self.user,
+            workspace=self.workspace,
+            role=WorkspaceMembership.RoleType.MEMBER,
+        )
+        WorkspaceMembership.objects.create(
+            user=self.other_user,
+            workspace=self.workspace,
+            role=WorkspaceMembership.RoleType.MEMBER,
+        )
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                WorkspaceMembership.objects.create(
+                    user=self.user,
+                    workspace=self.workspace,
+                    role=WorkspaceMembership.RoleType.MEMBER,
+                )
+
+    def test_duplicate_workspace_membership_has_friendly_error(self):
+        WorkspaceMembership.objects.create(
+            user=self.user,
+            workspace=self.workspace,
+            role=WorkspaceMembership.RoleType.MEMBER,
+        )
+
+        with self.assertRaisesMessage(
+            ValidationError,
+            "This user is already a member of the workspace.",
+        ):
+            WorkspaceService.add_member(
+                invited_by=self.other_user,
+                validated_data={
+                    "user": self.user,
+                    "workspace": self.workspace,
+                    "role": WorkspaceMembership.RoleType.MEMBER,
+                },
+            )
+
+    def test_non_negative_credit_balance_constraint(self):
+        self.workspace.credit_balance = 0
+        self.workspace.save(update_fields=["credit_balance"])
+        self.workspace.credit_balance = 25
+        self.workspace.save(update_fields=["credit_balance"])
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Workspace.objects.filter(pk=self.workspace.pk).update(
+                    credit_balance=-1,
+                )
+
+    def test_negative_credit_integrity_error_has_friendly_error(self):
+        def force_negative_balance(instance, *args, **kwargs):
+            return Workspace.objects.filter(pk=instance.pk).update(
+                credit_balance=-1,
+            )
+
+        with self.assertRaisesMessage(
+            ValidationError,
+            "The workspace does not have enough credits for this operation.",
+        ):
+            with patch.object(
+                Workspace,
+                "save",
+                force_negative_balance,
+            ):
+                use_credits(self.workspace, self.user, 1)
+
+    def test_invalid_task_status_constraint(self):
+        Task.objects.create(
+            project=self.project,
+            title="Valid task",
+            created_by=self.user,
+            status=Task.StatusType.TODO,
+        )
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                Task.objects.create(
+                    project=self.project,
+                    title="Invalid task",
+                    created_by=self.user,
+                    status="NOT_A_STATUS",
+                )
+
+    def test_invalid_task_status_has_friendly_error(self):
+        with self.assertRaisesMessage(
+            ValidationError,
+            "The requested task status is invalid.",
+        ):
+            TaskService.create_task(
+                user=self.user,
+                validated_data={
+                    "project": self.project,
+                    "title": "Invalid task",
+                    "status": "NOT_A_STATUS",
+                },
+            )

@@ -1,6 +1,6 @@
 import logging
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 import sib_api_v3_sdk
 from sib_api_v3_sdk.rest import ApiException
 from django.conf import settings
@@ -12,6 +12,30 @@ from .models import EmailOTP,WorkspaceMembership, Workspace, Project, Task, Noti
 User = get_user_model()
 
 logger = logging.getLogger(__name__)
+
+
+def _raise_constraint_validation_error(error, constraint_name, message):
+    cause = error.__cause__
+    database_constraint = getattr(getattr(cause, "diag", None), "constraint_name", None)
+    if database_constraint is None and cause is not None:
+        database_constraint = str(cause)
+
+    database_error = str(database_constraint)
+    sqlite_markers = {
+        "unique_workspace_membership": (
+            "accounts_workspacemembership.workspace_id",
+            "accounts_workspacemembership.user_id",
+        ),
+        "credit_balance_non_negative": ("credit_balance",),
+    }
+    markers = sqlite_markers.get(constraint_name, ())
+    matches_constraint = constraint_name in database_error or (
+        bool(markers) and all(marker in database_error for marker in markers)
+    )
+    if not matches_constraint:
+        raise error
+
+    raise ValidationError({"detail": message}) from error
 
 
 def send_otp_email(email, first_name, otp_code, purpose):
@@ -162,7 +186,15 @@ class WorkspaceService:
         `validated_data` comes straight from WorkspaceMembershipSerializer —
         expected to contain `user`, `workspace`, and `role`.
         """
-        membership = WorkspaceMembership.objects.create(**validated_data)
+        try:
+            with transaction.atomic():
+                membership = WorkspaceMembership.objects.create(**validated_data)
+        except IntegrityError as error:
+            _raise_constraint_validation_error(
+                error,
+                "unique_workspace_membership",
+                "This user is already a member of the workspace.",
+            )
 
         notification = NotificationService.create(
             recipient=membership.user,
@@ -212,10 +244,17 @@ class TaskService:
                 amount=3,
             )
 
-        task = Task.objects.create(
-            created_by=user,
-            **validated_data
-        )
+        try:
+            task = Task.objects.create(
+                created_by=user,
+                **validated_data
+            )
+        except IntegrityError as error:
+            _raise_constraint_validation_error(
+                error,
+                "valid_task_status",
+                "The requested task status is invalid.",
+            )
 
         if task.assigned_to_id:
             notification = NotificationService.create(
@@ -387,7 +426,15 @@ def use_credits(workspace,user,amount):
         raise ValueError("Insufficient credits in workspace.")
 
     workspace.credit_balance -= amount
-    workspace.save(update_fields=["credit_balance","updated_at"])
+    try:
+        with transaction.atomic():
+            workspace.save(update_fields=["credit_balance", "updated_at"])
+    except IntegrityError as error:
+        _raise_constraint_validation_error(
+            error,
+            "credit_balance_non_negative",
+            "The workspace does not have enough credits for this operation.",
+        )
 
     CreditUsage.objects.create(
         workspace=workspace,

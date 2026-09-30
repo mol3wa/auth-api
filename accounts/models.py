@@ -211,6 +211,23 @@ class Task(models.Model):
     def __str__(self):
         return self.title
     
+    class Meta:
+     constraints = [
+        models.CheckConstraint(
+            condition=models.Q(
+                status__in=[
+                    "TODO",
+                    "IN_PROGRESS",
+                    "IN_REVIEW",
+                    "APPROVED",
+                    "REJECTED",
+                    "CANCELLED",
+                ]
+            ),
+            name="valid_task_status",
+        ),
+    ]
+    
 class Notification(models.Model):
     class NotificationType(models.TextChoices):
         WORKSPACE_INVITE = "workspace_invite", "Workspace Invite"
