@@ -247,6 +247,14 @@ class Notification(models.Model):
     notification_type = models.CharField(max_length=50, choices=NotificationType.choices)
     payload = models.JSONField(default=dict, blank=True)
 
+    deduplication_key = models.CharField(
+        max_length=255,
+        unique=True,
+        null=True,
+        blank=True,
+    )
+
+
     status = models.CharField(
         max_length=20, choices=StatusType.choices, default=StatusType.PENDING
     )
@@ -264,4 +272,28 @@ class Notification(models.Model):
 
     def __str__(self):
         return f"{self.notification_type} -> {self.recipient_id} ({self.status})"
- 
+
+
+class IdempotencyKey(models.Model):
+    class StatusType(models.TextChoices):
+        PENDING = "PENDING", "Pending"
+        SUCCESS = "SUCCESS", "Success"
+        FAILED = "FAILED", "Failed"
+
+    key = models.CharField(max_length=255, unique=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    status = models.CharField(
+        max_length=20,
+        choices=StatusType.choices,
+        default=StatusType.PENDING
+    )
+    request_hash = models.CharField(max_length=64)
+
+    workspace = models.ForeignKey(
+        Workspace,
+        on_delete=models.CASCADE,
+        related_name="idempotency_keys",
+    )
+    

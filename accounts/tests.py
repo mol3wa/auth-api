@@ -1,15 +1,182 @@
+import hashlib
+
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.test import TestCase
+from django.urls import reverse
 from rest_framework.exceptions import ValidationError
 from rest_framework.test import APITestCase
 from unittest.mock import patch
 
-from .models import AuditRecord, CreditUsage, Project, Task, Workspace, WorkspaceMembership
-from .services import TaskService, WorkspaceService, use_credits
+from .models import (
+    AuditRecord,
+    CreditUsage,
+    IdempotencyKey,
+    Notification,
+    Project,
+    Task,
+    Workspace,
+    WorkspaceMembership,
+)
+from .services import NotificationService, TaskService, WorkspaceService, use_credits
 
 
 User = get_user_model()
+
+
+class UseCreditsViewTest(APITestCase):
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="credits-view@example.com",
+            first_name="Credits",
+            last_name="User",
+            password="password123",
+        )
+        self.workspace = Workspace.objects.create(
+            name="Credits View Workspace",
+            credit_balance=100,
+        )
+        WorkspaceMembership.objects.create(
+            user=self.user,
+            workspace=self.workspace,
+            role=WorkspaceMembership.RoleType.OWNER,
+        )
+        self.url = reverse(
+            "use-credits",
+            kwargs={"workspace_id": self.workspace.id},
+        )
+        self.client.force_authenticate(user=self.user)
+
+    def test_deducts_credits_and_returns_success(self):
+        response = self.client.post(
+            self.url,
+            {"amount": 20},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="test-key",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["detail"], "Successfully used 20 credits.")
+        self.workspace.refresh_from_db()
+        self.assertEqual(self.workspace.credit_balance, 80)
+        self.assertEqual(CreditUsage.objects.count(), 1)
+        self.assertEqual(AuditRecord.objects.count(), 1)
+        self.assertEqual(IdempotencyKey.objects.count(), 1)
+        idempotency_record = IdempotencyKey.objects.get()
+        expected_request_hash = hashlib.sha256(
+            f"{self.workspace.id}:{self.user.id}:20".encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(idempotency_record.key, "test-key")
+        self.assertEqual(idempotency_record.request_hash, expected_request_hash)
+        self.assertEqual(idempotency_record.workspace, self.workspace)
+        self.assertEqual(idempotency_record.status, IdempotencyKey.StatusType.SUCCESS)
+
+    def test_repeated_request_with_same_key_is_processed_once(self):
+        request_data = {"amount": 20}
+        first_response = self.client.post(
+            self.url,
+            request_data,
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="repeat-key",
+        )
+        second_response = self.client.post(
+            self.url,
+            request_data,
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="repeat-key",
+        )
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 200)
+        self.workspace.refresh_from_db()
+        self.assertEqual(self.workspace.credit_balance, 80)
+        self.assertEqual(CreditUsage.objects.count(), 1)
+        self.assertEqual(AuditRecord.objects.count(), 1)
+        self.assertEqual(IdempotencyKey.objects.count(), 1)
+
+    def test_rejects_same_key_for_different_request(self):
+        first_response = self.client.post(
+            self.url,
+            {"amount": 10},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="reused-key",
+        )
+        second_response = self.client.post(
+            self.url,
+            {"amount": 20},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="reused-key",
+        )
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 400)
+        self.assertIn(
+            "already been used for a different request",
+            second_response.data["detail"],
+        )
+        self.workspace.refresh_from_db()
+        self.assertEqual(self.workspace.credit_balance, 90)
+        self.assertEqual(CreditUsage.objects.count(), 1)
+        self.assertEqual(AuditRecord.objects.count(), 1)
+        self.assertEqual(IdempotencyKey.objects.count(), 1)
+
+    def test_rejects_non_positive_amount(self):
+        response = self.client.post(
+            self.url,
+            {"amount": 0},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="test-key",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.workspace.refresh_from_db()
+        self.assertEqual(self.workspace.credit_balance, 100)
+        self.assertEqual(CreditUsage.objects.count(), 0)
+
+    def test_returns_bad_request_when_balance_is_insufficient(self):
+        response = self.client.post(
+            self.url,
+            {"amount": 101},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="test-key",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.data["detail"],
+            "Insufficient credits in workspace.",
+        )
+        self.workspace.refresh_from_db()
+        self.assertEqual(self.workspace.credit_balance, 100)
+        self.assertEqual(CreditUsage.objects.count(), 0)
+        self.assertEqual(AuditRecord.objects.count(), 0)
+        self.assertEqual(IdempotencyKey.objects.count(), 1)
+        idempotency_record = IdempotencyKey.objects.get()
+        self.assertEqual(idempotency_record.key, "test-key")
+        self.assertEqual(idempotency_record.workspace, self.workspace)
+        self.assertEqual(idempotency_record.status, IdempotencyKey.StatusType.FAILED)
+
+    def test_requires_idempotency_key(self):
+        response = self.client.post(self.url, {"amount": 20}, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.data["detail"],
+            "Idempotency-Key header is required.",
+        )
+        self.workspace.refresh_from_db()
+        self.assertEqual(self.workspace.credit_balance, 100)
+        self.assertEqual(IdempotencyKey.objects.count(), 0)
+        self.assertEqual(CreditUsage.objects.count(), 0)
+        self.assertEqual(AuditRecord.objects.count(), 0)
+
+    def test_requires_authentication(self):
+        self.client.force_authenticate(user=None)
+
+        response = self.client.post(self.url, {"amount": 20}, format="json")
+
+        self.assertEqual(response.status_code, 401)
 
 
 class UseCreditsTransactionTest(TestCase):
@@ -274,3 +441,82 @@ class DatabaseConstraintTest(TestCase):
                     "status": "NOT_A_STATUS",
                 },
             )
+
+
+class WorkspaceCreatedNotificationDeduplicationTest(TestCase):
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="workspace-notifications@example.com",
+            first_name="Workspace",
+            last_name="Owner",
+            password="password123",
+        )
+
+    @patch("accounts.tasks.send_notification_email")
+    def test_workspace_creation_creates_expected_notification(self, send_email):
+        workspace = WorkspaceService.create_workspace(
+            user=self.user,
+            validated_data={"name": "Notification Workspace"},
+        )
+
+        self.assertEqual(Notification.objects.count(), 1)
+        notification = Notification.objects.get()
+        self.assertEqual(
+            notification.notification_type,
+            Notification.NotificationType.WORKSPACE_CREATED,
+        )
+        self.assertEqual(
+            notification.deduplication_key,
+            f"workspace_created:{workspace.id}:{self.user.id}",
+        )
+        self.assertEqual(
+            notification.payload,
+            {
+                "workspace_id": workspace.id,
+                "workspace_name": workspace.name,
+            },
+        )
+        send_email.assert_called_once_with(notification.id)
+
+    def test_duplicate_workspace_created_notification_returns_same_record(self):
+        workspace = Workspace.objects.create(name="Duplicate Event Workspace")
+        deduplication_key = f"workspace_created:{workspace.id}:{self.user.id}"
+        notification_data = {
+            "recipient": self.user,
+            "notification_type": Notification.NotificationType.WORKSPACE_CREATED,
+            "payload": {
+                "workspace_id": workspace.id,
+                "workspace_name": workspace.name,
+            },
+            "deduplication_key": deduplication_key,
+        }
+
+        first_notification = NotificationService.create(**notification_data)
+        second_notification = NotificationService.create(**notification_data)
+
+        self.assertEqual(Notification.objects.count(), 1)
+        self.assertEqual(first_notification.pk, second_notification.pk)
+        self.assertEqual(first_notification.deduplication_key, deduplication_key)
+
+    @patch("accounts.tasks.send_notification_email")
+    def test_different_workspaces_have_distinct_notification_keys(self, send_email):
+        first_workspace = WorkspaceService.create_workspace(
+            user=self.user,
+            validated_data={"name": "First Notification Workspace"},
+        )
+        second_workspace = WorkspaceService.create_workspace(
+            user=self.user,
+            validated_data={"name": "Second Notification Workspace"},
+        )
+
+        self.assertEqual(Notification.objects.count(), 2)
+        notifications = list(Notification.objects.order_by("deduplication_key"))
+        self.assertEqual(
+            {notification.deduplication_key for notification in notifications},
+            {
+                f"workspace_created:{first_workspace.id}:{self.user.id}",
+                f"workspace_created:{second_workspace.id}:{self.user.id}",
+            },
+        )
+        self.assertEqual(send_email.call_count, 2)

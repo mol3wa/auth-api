@@ -175,3 +175,4 @@ class TaskSerializer(serializers.ModelSerializer):
 
 class UseCreditsSerializer(serializers.Serializer):
     amount = serializers.IntegerField(min_value=1)
+    

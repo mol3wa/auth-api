@@ -1,10 +1,12 @@
 from django.urls import path
 from . import views
 from .views import (
+    UseCreditsView,
     WorkspaceViewSet,
     WorkspaceMembershipViewSet,
     ProjectViewSet,
     TaskViewSet,
+    
 
 )
 from rest_framework.routers import DefaultRouter
@@ -17,7 +19,7 @@ urlpatterns = [
     path('verify-update-email/', views.VerifyEmailUpdateView.as_view(), name='verify-email-update'),
     path('delete-account/', views.DeleteAccountView.as_view(), name='delete-account'),
     path("profile/", views.UserProfileView.as_view(), name="user-profile"),
-   
+    path("api/workspaces/<int:workspace_id>/credits/use/",UseCreditsView.as_view(),name="use-credits"),
 ]
 router = DefaultRouter()
 

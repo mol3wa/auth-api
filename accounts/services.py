@@ -6,8 +6,8 @@ from sib_api_v3_sdk.rest import ApiException
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from rest_framework.exceptions import ValidationError, PermissionDenied
-from .models import EmailOTP,WorkspaceMembership, Workspace, Project, Task, Notification,AuditRecord,CreditUsage
-
+from .models import EmailOTP,WorkspaceMembership, Workspace, Project, Task, Notification,AuditRecord,CreditUsage,IdempotencyKey
+import hashlib
 
 User = get_user_model()
 
@@ -173,8 +173,13 @@ class WorkspaceService:
         notification = NotificationService.create(
             recipient=user,
             notification_type=Notification.NotificationType.WORKSPACE_CREATED,
-            payload={"workspace_name": workspace.name},
+            payload={
+                "workspace_id": workspace.id,
+                "workspace_name": workspace.name,
+            },
+            deduplication_key=f"workspace_created:{workspace.id}:{user.id}",
         )
+
         from accounts.tasks import send_notification_email
         send_notification_email(notification.id)
 
@@ -296,17 +301,48 @@ class TaskService:
    
 
 class NotificationService:
+
+
     @staticmethod
-    def create(*, recipient, notification_type: str, payload: dict) -> Notification:
+    def create(
+        *,
+        recipient,
+        notification_type: str,
+        payload: dict,
+        deduplication_key: str | None = None,
+    ) -> Notification:
+
+        if deduplication_key:
+            notification, created = Notification.objects.get_or_create(
+                deduplication_key=deduplication_key,
+                defaults={
+                    "recipient": recipient,
+                    "notification_type": notification_type,
+                    "payload": payload,
+                },
+            )
+
+            if not created:
+                logger.info(
+                    "Duplicate notification skipped key=%s",
+                    deduplication_key,
+                )
+
+            return notification
+
         notification = Notification.objects.create(
             recipient=recipient,
             notification_type=notification_type,
             payload=payload,
         )
+
         logger.info(
             "Notification created id=%s type=%s recipient=%s",
-            notification.id, notification_type, recipient.id,
+            notification.id,
+            notification_type,
+            recipient.id,
         )
+
         return notification
 
 
@@ -448,4 +484,77 @@ def use_credits(workspace,user,amount):
         action=f" {amount} credits deducted.",
     )
 
-    return workspace 
+    return workspace
+
+
+@transaction.atomic
+def use_credits_idempotently(
+    workspace,
+    user,
+    amount,
+    idempotency_key,
+):
+    request_data = f"{workspace.id}:{user.id}:{amount}"
+
+    request_hash = hashlib.sha256(
+        request_data.encode("utf-8")
+    ).hexdigest()
+
+    try:
+        idempotency_record = (
+            IdempotencyKey.objects
+            .select_for_update()
+            .get(key=idempotency_key)
+        )
+
+    except IdempotencyKey.DoesNotExist:
+
+        try:
+            with transaction.atomic():
+                idempotency_record = IdempotencyKey.objects.create(
+                    key=idempotency_key,
+                    request_hash=request_hash,
+                    workspace=workspace,
+                    status=IdempotencyKey.StatusType.PENDING,
+                )
+
+        except IntegrityError:
+            idempotency_record = (
+                IdempotencyKey.objects
+                .select_for_update()
+                .get(key=idempotency_key)
+            )
+
+    if idempotency_record.request_hash != request_hash:
+        raise ValueError(
+            "This Idempotency-Key has already been used for a different request."
+        )
+
+    if idempotency_record.status == IdempotencyKey.StatusType.SUCCESS:
+        return {
+            "detail": "Request has already been processed."
+        }
+
+    if idempotency_record.status == IdempotencyKey.StatusType.FAILED:
+        raise ValueError(
+            "This request has already failed. Use a new Idempotency-Key to try again."
+        )
+
+    try:
+        workspace = use_credits(
+            workspace=workspace,
+            user=user,
+            amount=amount,
+        )
+
+    except ValueError as error:
+        idempotency_record.status = IdempotencyKey.StatusType.FAILED
+        idempotency_record.save(update_fields=["status"])
+        raise error
+
+    idempotency_record.status = IdempotencyKey.StatusType.SUCCESS
+    idempotency_record.save(update_fields=["status"])
+
+    return {
+        "detail": f"Successfully used {amount} credits.",
+    }

@@ -1,9 +1,11 @@
+from django.http import request
 from rest_framework import status, generics, permissions,viewsets
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.contrib.auth import get_user_model
+from rest_framework.views import APIView
 
 from accounts.permissions import IsAssignedUser, IsWorkspaceManagerOrOwner, IsWorkspaceOwner
 from .models import Workspace,WorkspaceMembership,Task,Project
@@ -11,7 +13,7 @@ from .models import Workspace,WorkspaceMembership,Task,Project
 from .serializers import (
     SignupSerializer, VerifyEmailSerializer,
     InitiateEmailUpdateSerializer, VerifyEmailUpdateSerializer,
-    DeleteAccountSerializer, UserProfileSerializer, WorkspaceSerializer,WorkspaceMembershipSerializer,ProjectSerializer,TaskSerializer
+    DeleteAccountSerializer, UserProfileSerializer, WorkspaceSerializer,WorkspaceMembershipSerializer,ProjectSerializer,TaskSerializer,UseCreditsSerializer
 )
 from .services import (
     signup_user,
@@ -22,11 +24,17 @@ from .services import (
     WorkspaceService,
     ProjectService,
     TaskService,
+    use_credits_idempotently
 
 )
 from drf_spectacular.utils import extend_schema
 from drf_spectacular.types import OpenApiTypes
 from rest_framework.decorators import action
+import hashlib
+
+from django.db import IntegrityError, transaction
+from django.shortcuts import get_object_or_404
+from .models import IdempotencyKey, Workspace
 
 User = get_user_model()
 
@@ -296,12 +304,51 @@ class TaskViewSet(viewsets.ModelViewSet):
         task = TaskService.transition(self.get_object(), "cancel", request.user)
         return Response(self.get_serializer(task).data)
 
-from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from rest_framework.views import APIView
 
-from .models import Workspace
-from .serializers import UseCreditsSerializer
-from .services import use_credits
+class UseCreditsView(APIView):
+    serializer_class = UseCreditsSerializer
+    permission_classes = [IsAuthenticated]
 
+    def post(self, request, workspace_id):
+        workspace = get_object_or_404(
+            Workspace,
+            pk=workspace_id,
+        )
+
+        serializer = self.serializer_class(
+            data=request.data
+        )
+        serializer.is_valid(raise_exception=True)
+
+        idempotency_key = request.headers.get(
+            "Idempotency-Key"
+        )
+
+        if not idempotency_key:
+            return Response(
+                {
+                    "detail": "Idempotency-Key header is required."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        amount = serializer.validated_data["amount"]
+
+        try:
+            result = use_credits_idempotently(
+                workspace=workspace,
+                user=request.user,
+                amount=amount,
+                idempotency_key=idempotency_key,
+            )
+
+        except ValueError as error:
+            return Response(
+                {"detail": str(error)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(
+            result,
+            status=status.HTTP_200_OK,
+        )
